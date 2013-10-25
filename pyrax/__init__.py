@@ -719,7 +719,7 @@ def connect_to_autoscale(identity, region=None):
 
 def connect_to_queues(region=None):
     """Creates a client for working with Queues."""
-    return _create_client(ep_name="queues",
+    return _create_client(identity, ep_name="queues",
             service_type="queues", region=region)
 
 
