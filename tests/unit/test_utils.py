@@ -15,7 +15,7 @@ from mock import MagicMock as Mock
 
 import pyrax.utils as utils
 import pyrax.exceptions as exc
-from tests.unit import fakes
+import fakes
 
 FAKE_CONTENT = "x" * 100
 
@@ -53,7 +53,7 @@ class UtilsTest(unittest.TestCase):
         self.assertFalse(os.path.exists(tmp))
 
     def test_get_checksum_from_string(self):
-        test = "some random text"
+        test = utils.random_ascii()
         md = hashlib.md5()
         md.update(test)
         expected = md.hexdigest()
@@ -61,7 +61,7 @@ class UtilsTest(unittest.TestCase):
         self.assertEqual(expected, received)
 
     def test_get_checksum_from_unicode(self):
-        test = u"some ñøñåßçîî text"
+        test = utils.random_unicode()
         md = hashlib.md5()
         enc = "utf8"
         md.update(test.encode(enc))
@@ -79,9 +79,7 @@ class UtilsTest(unittest.TestCase):
         self.assertEqual(expected, received)
 
     def test_get_checksum_from_binary(self):
-#        test = utils.random_unicode()
-#        test = open("tests/unit/python-logo.png", "rb").read()
-        test = fakes.png_file
+        test = fakes.png_content
         md = hashlib.md5()
         enc = "utf8"
         md.update(test)
@@ -310,6 +308,22 @@ class UtilsTest(unittest.TestCase):
         self.assertEqual(utils.iso_time_string(dt, show_tzinfo=False),
                 "1999-12-31T23:59:59")
 
+    def test_rfc2822_format(self):
+        now = datetime.datetime.now()
+        now_year = str(now.year)
+        fmtd = utils.rfc2822_format(now)
+        self.assertTrue(now_year in fmtd)
+
+    def test_rfc2822_format_str(self):
+        now = str(datetime.datetime.now())
+        fmtd = utils.rfc2822_format(now)
+        self.assertEqual(fmtd, now)
+
+    def test_rfc2822_format_fail(self):
+        now = {}
+        fmtd = utils.rfc2822_format(now)
+        self.assertEqual(fmtd, now)
+
     def test_match_pattern(self):
         ignore_pat = "*.bad"
         self.assertTrue(utils.match_pattern("some.bad", ignore_pat))
@@ -338,10 +352,25 @@ class UtilsTest(unittest.TestCase):
         self.assertEqual(utils.get_name(obj.name), nm)
         self.assertRaises(exc.MissingName, utils.get_name, object())
 
+    def test_params_to_dict(self):
+        dct = {}
+        k1 = utils.random_unicode()
+        k2 = utils.random_unicode()
+        k3 = utils.random_unicode()
+        k4 = utils.random_unicode()
+        v1 = utils.random_unicode()
+        v2 = utils.random_unicode()
+        v3 = utils.random_unicode()
+        local = {k1: v1, k2: v2, k3: v3}
+        params = [k2, k3, k4]
+        expected = {k2: v2, k3: v3}
+        utils.params_to_dict(params, dct, local)
+        self.assertEqual(dct, expected)
+
     def test_import_class(self):
-        cls_string = "tests.unit.fakes.FakeManager"
+        cls_string = "pyrax.utils.SelfDeletingTempfile"
         ret = utils.import_class(cls_string)
-        self.assertTrue(ret is fakes.FakeManager)
+        self.assertTrue(ret is utils.SelfDeletingTempfile)
 
     def test_update_exc(self):
         msg1 = utils.random_unicode()

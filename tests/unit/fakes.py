@@ -258,6 +258,9 @@ class FakeEntity(object):
     def get(self, *args, **kwargs):
         pass
 
+    def list(self, *args, **kwargs):
+        pass
+
 
 class FakeDatabaseUser(CloudDatabaseUser):
     pass
@@ -273,7 +276,7 @@ class FakeDatabaseVolume(CloudDatabaseVolume):
 class FakeDatabaseInstance(CloudDatabaseInstance):
     def __init__(self, *args, **kwargs):
         self.id = utils.random_unicode()
-        self.manager = FakeManager()
+        self.manager = FakeDatabaseManager()
         self.manager.api = FakeDatabaseClient()
         self._database_manager = CloudDatabaseDatabaseManager(
                 FakeDatabaseClient())
@@ -281,11 +284,12 @@ class FakeDatabaseInstance(CloudDatabaseInstance):
         self.volume = FakeDatabaseVolume(self)
 
 
-class FakeDatabaseManager(CloudDNSManager):
+class FakeDatabaseManager(CloudDatabaseManager):
     def __init__(self, api=None, *args, **kwargs):
         if api is None:
             api = FakeDatabaseClient()
         super(FakeDatabaseManager, self).__init__(api, *args, **kwargs)
+        self.uri_base = "instances"
 
 
 class FakeDatabaseClient(CloudDatabaseClient):
@@ -536,15 +540,15 @@ class FakeQueueMessage(QueueMessage):
 
 
 class FakeQueueClient(QueueClient):
-    def __init__(self, *args, **kwargs):
-        super(FakeQueueClient, self).__init__("fakeuser",
+    def __init__(self, identity, *args, **kwargs):
+        super(FakeQueueClient, self).__init__(identity, "fakeuser",
                 "fakepassword", *args, **kwargs)
 
 
 class FakeQueueManager(QueueManager):
     def __init__(self, api=None, *args, **kwargs):
         if api is None:
-            api = FakeQueueClient()
+            api = FakeQueueClient(identity=FakeIdentity())
         super(FakeQueueManager, self).__init__(api, *args, **kwargs)
         self.id = utils.random_ascii()
 
@@ -773,6 +777,6 @@ class FakeIdentityResponse(FakeResponse):
 
 _module_pth = os.path.dirname(pyrax.__file__)
 _img_path = os.path.join(_module_pth, "..", "tests", "unit", "python-logo.png")
-png_file = None
+png_content = None
 with open(_img_path, "rb") as pfile:
-    png_file = pfile.read()
+    png_content = pfile.read()
