@@ -12,10 +12,6 @@ from pyrax.autoscale import AutoScalePolicy
 from pyrax.autoscale import AutoScaleWebhook
 from pyrax.autoscale import ScalingGroup
 from pyrax.autoscale import ScalingGroupManager
-from pyrax.cf_wrapper.client import BulkDeleter
-from pyrax.cf_wrapper.client import FolderUploader
-from pyrax.cf_wrapper.container import Container
-from pyrax.cf_wrapper.storage_object import StorageObject
 from pyrax.client import BaseClient
 from pyrax.clouddatabases import CloudDatabaseClient
 from pyrax.clouddatabases import CloudDatabaseDatabaseManager
@@ -49,6 +45,13 @@ from pyrax.image import ImageClient
 from pyrax.image import ImageManager
 from pyrax.image import ImageMemberManager
 from pyrax.image import ImageTagManager
+from pyrax.object_storage import BulkDeleter
+from pyrax.object_storage import Container
+from pyrax.object_storage import ContainerManager
+from pyrax.object_storage import FolderUploader
+from pyrax.object_storage import StorageClient
+from pyrax.object_storage import StorageObject
+from pyrax.object_storage import StorageObjectManager
 from pyrax.queueing import Queue
 from pyrax.queueing import QueueClaim
 from pyrax.queueing import QueueMessage
@@ -91,7 +94,7 @@ class FakeResponse(object):
         return "Line1\nLine2"
 
     def get(self, arg):
-        pass
+        return self.headers.get(arg)
 
     def json(self):
         return self.content
@@ -105,7 +108,23 @@ class FakeClient(object):
         self.identity = FakeIdentity()
 
 
+class FakeStorageClient(StorageClient):
+    def __init__(self, *args, **kwargs):
+        super(FakeStorageClient, self).__init__("fakeuser",
+                "fakepassword", *args, **kwargs)
+
+
+class FakeContainerManager(ContainerManager):
+    def __init__(self, api=None, *args, **kwargs):
+        if api is None:
+            api = FakeStorageClient()
+        super(FakeContainerManager, self).__init__(api, *args, **kwargs)
+
+
 class FakeContainer(Container):
+    def __init__(self, *args, **kwargs):
+        self.object_manager = FakeStorageObjectManager()
+
     def _fetch_cdn_data(self):
         self._cdn_uri = None
         self._cdn_ttl = self.client.default_cdn_ttl
@@ -113,6 +132,15 @@ class FakeContainer(Container):
         self._cdn_streaming_uri = None
         self._cdn_ios_uri = None
         self._cdn_log_retention = False
+
+
+class FakeStorageObjectManager(StorageObjectManager):
+    def __init__(self, api=None, *args, **kwargs):
+        if api is None:
+            api = FakeStorageClient()
+        if "uri_base" not in kwargs:
+            kwargs["uri_base"] = utils.random_ascii()
+        super(FakeStorageObjectManager, self).__init__(api, *args, **kwargs)
 
 
 class FakeStorageObject(StorageObject):

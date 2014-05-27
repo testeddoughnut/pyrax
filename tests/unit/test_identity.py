@@ -5,10 +5,10 @@ import datetime
 import json
 import os
 import random
-import StringIO
 import sys
 import unittest
-import urllib2
+
+from six import StringIO
 
 from mock import MagicMock as Mock
 from mock import patch
@@ -893,7 +893,7 @@ class IdentityTest(unittest.TestCase):
         ident.http_log_debug = True
         uri = "https://%s/%s" % (utils.random_ascii(), utils.random_ascii())
         sav_stdout = sys.stdout
-        out = StringIO.StringIO()
+        out = StringIO()
         sys.stdout = out
         utils.add_method(ident, lambda self: "", "_get_auth_endpoint")
         dkv = utils.random_ascii()
@@ -1286,6 +1286,7 @@ class IdentityTest(unittest.TestCase):
         sav_setting = pyrax.get_setting
         pyrax.get_setting = Mock(return_value=None)
         self.assertRaises(exc.EndpointNotDefined, ident._get_auth_endpoint)
+        pyrax.get_setting = sav_setting
 
     def test_get_token(self):
         for cls in self.id_classes.values():
