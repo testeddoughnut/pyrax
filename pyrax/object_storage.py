@@ -176,8 +176,6 @@ class Container(BaseResource):
             objects = self.list(marker=marker, limit=limit, prefix=prefix,
                     delimiter=delimiter, end_marker=end_marker)
         return [obj.name for obj in objects]
-    # Alias for backwards compatibility
-    get_object_names = list_object_names
 
 
     def find(self, **kwargs):
@@ -325,12 +323,9 @@ class Container(BaseResource):
         delimiter param is there for backwards compatibility only, as the call
         requires the delimiter to be '/'.
         """
-        mthd = self.list_all if full_listing else self.list
-        objs = mthd(marker=marker, limit=limit, prefix=prefix, delimiter="/")
-        return [obj for obj in objs if "/" in obj.name]
+        return self.manager.list_subdirs(marker=marker, limit=limit,
+                prefix=prefix, delimiter=delimiter, full_listing=full_listing)
 
-
-        return subdirs
 
 
 class StorageObject(BaseResource):
@@ -374,17 +369,7 @@ class StorageObjectManager(BaseManager):
         resp, resp_body = self.api.method_get(uri)
         if return_raw:
             return resp_body
-        subdirs = [elem for elem in resp_body if "subdir" in elem]
-        objs_body = [obj for obj in resp_body if obj not in subdirs]
-        objs = [StorageObject(self, obj) for obj in objs_body]
-        for subdir in subdirs:
-            sub_uri = "%s&prefix=%s" % (uri, subdir["subdir"])
-            resp, resp_body = self.api.method_get(sub_uri)
-            subobjs = [StorageObject(self, obj) for obj in resp_body]
-            for subobj in subobjs:
-                if hasattr(subobj, "subdir"):
-                    setattr(subobj, "name", subobj.subdir)
-            objs.extend(subobjs)
+        objs = [StorageObject(self, elem) for elem in resp_body]
         return objs
 
 
@@ -924,7 +909,7 @@ class ContainerManager(BaseManager):
         return temp_url
 
 
-    def list_containers_info(self):
+    def list_containers_info(self, limit=None, marker=None):
         """Returns a list of info on Containers.
 
         For each container, a dict containing the following keys is returned:
@@ -933,7 +918,11 @@ class ContainerManager(BaseManager):
             count - the number of objects in the container
             bytes - the total bytes in the container
         """
-        resp, resp_body = self.api.method_get("")
+        uri = ""
+        qs = utils.dict_to_qs({"limit": limit, "marker": marker})
+        if qs:
+            uri += "%s?%s" % (uri, qs)
+        resp, resp_body = self.api.method_get(uri)
         return resp_body
 
 
@@ -1083,14 +1072,23 @@ class ContainerManager(BaseManager):
 
 
     @assure_container
-    def list_subdirs(self, container):
+    def list_subdirs(self, container, marker=None, limit=None, prefix=None,
+            delimiter=None, full_listing=False):
         """
-        Although you cannot nest directories, you can simulate a hierarchical
-        structure within a single container by adding forward slash characters
-        (/) in the object name. This method returns a list of all of these
-        pseudo-subdirectories in the specified container.
+        Returns a list of StorageObjects representing the pseudo-subdirectories
+        in the specified container. You can use the marker and limit params to
+        handle pagination, and the prefix param to filter the objects returned.
+        The 'delimiter' parameter is ignored, as the only meaningful value is
+        '/'.
         """
-        return container.list_subdirs()
+        mthd = container.list_all if full_listing else container.list
+        objs = mthd(marker=marker, limit=limit, prefix=prefix, delimiter="/",
+                return_raw=True)
+        sdirs = [obj for obj in objs if "subdir" in obj]
+        for sdir in sdirs:
+            sdir["name"] = sdir["subdir"]
+        mgr = container.object_manager
+        return [StorageObject(mgr, sdir) for sdir in sdirs]
 
 
     @assure_container
@@ -1265,6 +1263,7 @@ class StorageClient(BaseClient):
         # Constants used in metadata headers
         super(StorageClient, self).__init__(*args, **kwargs)
         self._cached_temp_url_key = ""
+        self.cdn_management_url = ""
         self.method_dict = {
                 "HEAD": self.method_head,
                 "GET": self.method_get,
@@ -1273,18 +1272,22 @@ class StorageClient(BaseClient):
                 "DELETE": self.method_delete,
                 "PATCH": self.method_patch,
                 }
+        # Configure CDN, if available
+        self._configure_cdn()
         # Alias old method names to new versions for backwards compatibility.
         self._backwards_aliases()
 
 
-    def get(self, item):
+    def _configure_cdn(self):
         """
-        Returns the container whose name is provided as 'item'. If 'item' is
-        not a string, the original item is returned unchanged.
+        Initialize CDN-related endpoints, if available.
         """
-        if isinstance(item, six.string_types):
-            item = super(StorageClient, self).get(item)
-        return item
+        ident = self.identity
+        cdn_svc = ident.services.get("object_cdn")
+        if cdn_svc:
+            ep = cdn_svc.endpoints.get(self.region_name)
+            if ep:
+                self.cdn_management_url = ep.public_url
 
 
     def _backwards_aliases(self):
@@ -1300,6 +1303,16 @@ class StorageClient(BaseClient):
         self.get_container_objects = self.list_container_objects
         self.get_container_object_names = self.list_container_object_names
         self.get_info = self.get_account_info
+
+
+    def get(self, item):
+        """
+        Returns the container whose name is provided as 'item'. If 'item' is
+        not a string, the original item is returned unchanged.
+        """
+        if isinstance(item, six.string_types):
+            item = super(StorageClient, self).get(item)
+        return item
 
 
     def _configure_manager(self):
@@ -1344,8 +1357,8 @@ class StorageClient(BaseClient):
         account.
         """
         headers = self._manager.get_account_headers()
-        return (headers["x-account-container-count"],
-                headers["x-account-bytes-used"])
+        return (headers.get("x-account-container-count"),
+                headers.get("x-account-bytes-used"))
 
 
     def get_account_metadata(self, prefix=None):
@@ -1470,7 +1483,7 @@ class StorageClient(BaseClient):
         return [cont.name for cont in self.list()]
 
 
-    def list_containers_info(self):
+    def list_containers_info(self, limit=None, marker=None):
         """Returns a list of info on Containers.
 
         For each container, a dict containing the following keys is returned:
@@ -1479,7 +1492,7 @@ class StorageClient(BaseClient):
             count - the number of objects in the container
             bytes - the total bytes in the container
         """
-        return self._manager.list_containers_info()
+        return self._manager.list_containers_info(limit=limit, marker=marker)
 
 
     def list_public_containers(self):
@@ -1712,12 +1725,12 @@ class StorageClient(BaseClient):
                 response_dict=extra_info)
 
 
-    def remove_object_metadata_key(self, container, obj, key):
+    def remove_object_metadata_key(self, container, obj, key, prefix=None):
         """
         Removes the specified key from the storage object's metadata. If the key
         does not exist in the metadata, nothing is done.
         """
-        self.set_object_metadata(container, obj, {key: ""})
+        self.set_object_metadata(container, obj, {key: ""}, prefix=prefix)
 
 
     def list_container_objects(self, container, marker=None, limit=None,
@@ -1744,14 +1757,17 @@ class StorageClient(BaseClient):
         return self._manager.object_listing_iterator(container, prefix=prefix)
 
 
-    def list_container_subdirs(self, container):
+    def list_container_subdirs(self, container, marker=None, limit=None,
+            prefix=None, delimiter=None, full_listing=False):
         """
         Although you cannot nest directories, you can simulate a hierarchical
         structure within a single container by adding forward slash characters
         (/) in the object name. This method returns a list of all of these
         pseudo-subdirectories in the specified container.
         """
-        return self._manager.list_subdirs(container)
+        return self._manager.list_subdirs(container, marker=marker,
+                limit=limit, prefix=prefix, delimiter=delimiter,
+                full_listing=full_listing)
 
 
     def get_object(self, container, obj):
@@ -1762,8 +1778,8 @@ class StorageClient(BaseClient):
 
 
     def store_object(self, container, obj_name, data, content_type=None,
-            etag=None, content_encoding=None, ttl=None, metadata=None,
-            return_none=False, extra_info=None):
+            etag=None, content_encoding=None, ttl=None, return_none=False,
+            chunk_size=None, headers=None, metadata=None, extra_info=None):
         """
         Creates a new object in the specified container, and populates it with
         the given data. A StorageObject reference to the uploaded file
@@ -1776,12 +1792,14 @@ class StorageClient(BaseClient):
         return self.create_object(container, obj_name=obj_name, data=data,
                 content_type=content_type, etag=etag,
                 content_encoding=content_encoding, ttl=ttl,
-                return_none=return_none)
+                return_none=return_none, chunk_size=chunk_size,
+                headers=headers, metadata=metadata)
 
 
     def upload_file(self, container, file_or_path, obj_name=None,
             content_type=None, etag=None, content_encoding=None, ttl=None,
-            content_length=None, return_none=False, extra_info=None):
+            content_length=None, return_none=False, headers=None,
+            extra_info=None):
         """
         Uploads the specified file to the container. If no name is supplied,
         the file's name will be used. Either a file path or an open file-like
@@ -1800,14 +1818,14 @@ class StorageClient(BaseClient):
         """
         return self.create_object(container, file_or_path=file_or_path,
                 obj_name=obj_name, content_type=content_type, etag=etag,
-                content_encoding=content_encoding, ttl=ttl,
+                content_encoding=content_encoding, ttl=ttl, headers=headers,
                 return_none=return_none)
 
 
     def create_object(self, container, file_or_path=None, data=None,
             obj_name=None, content_type=None, etag=None, content_encoding=None,
-            content_length=None, ttl=None, chunked=False, metadata=None,
-            return_none=False):
+            content_length=None, ttl=None, chunk_size=None, metadata=None,
+            headers=None, return_none=False):
         """
         Creates or replaces a storage object in the specified container.
 
@@ -1832,16 +1850,16 @@ class StorageClient(BaseClient):
         object will be deleted after that number of seconds.
 
         If you wish to store a stream of data (i.e., where you don't know the
-        total size in advance), set the `chunked` parameter to True, and omit
-        the `content_length` and `etag` parameters. This allows the data to be
-        streamed to the object in the container without having to be written to
-        disk first.
+        total size in advance), set the `chunk_size` parameter to a non-zero
+        value, and omit the `content_length` and `etag` parameters. This allows
+        the data to be streamed to the object in the container without having
+        to be written to disk first.
         """
         return self._manager.create_object(container, file_or_path=file_or_path,
                 data=data, obj_name=obj_name, content_type=content_type,
                 etag=etag, content_encoding=content_encoding,
-                content_length=content_length, ttl=ttl, chunked=chunked,
-                metadata=metadata, return_none=return_none)
+                content_length=content_length, ttl=ttl, chunk_size=chunk_size,
+                metadata=metadata, headers=headers, return_none=return_none)
 
 
     def fetch_object(self, container, obj, include_meta=False,
@@ -1878,6 +1896,52 @@ class StorageClient(BaseClient):
         than the specified 'size' value, the entire object is returned.
         """
         return self._manager.fetch_partial(container, obj, size)
+
+
+    def fetch_dlo(self, container, name, chunk_size=None):
+        """
+        Returns a list of 2-tuples in the form of (object_name,
+        fetch_generator) representing the components of a multi-part DLO
+        (Dynamic Large Object).  Each fetch_generator object can be interated
+        to retrieve its contents.
+
+        This is useful when transferring a DLO from one object storage system
+        to another. Examples would be copying DLOs from one region of a
+        provider to another, or copying a DLO from one provider to another.
+        """
+        if chunk_size is None:
+            chunk_size = DEFAULT_CHUNKSIZE
+
+        class FetchChunker(object):
+            """
+            Class that takes the generator objects returned by a chunked
+            fetch_object() call and wraps them to behave as file-like objects
+            for uploading.
+            """
+            def __init__(self, gen, verbose=False):
+                self.gen = gen
+                self.verbose = verbose
+                self.processed = 0
+                self.interval = 0
+
+            def read(self, size=None):
+                self.interval += 1
+                if self.verbose:
+                    if self.interval > 1024:
+                        self.interval = 0
+                        logit(".")
+                ret = self.gen.next()
+                self.processed += len(ret)
+                return ret
+
+        parts = self.get_container_objects(container, prefix=name)
+        fetches = [(part.name, self.fetch_object(container, part.name,
+                    chunk_size=chunk_size))
+                for part in parts
+                if part.name != name]
+        job = [(fetch[0], FetchChunker(fetch[1], verbose=False))
+                for fetch in fetches]
+        return job
 
 
     def download_object(self, container, obj, directory, structure=True):
@@ -2030,7 +2094,8 @@ class StorageClient(BaseClient):
 
 
     def sync_folder_to_container(self, folder_path, container, delete=False,
-            include_hidden=False, ignore=None, ignore_timestamps=False):
+            include_hidden=False, ignore=None, ignore_timestamps=False,
+            object_prefix="", verbose=False):
         """
         Compares the contents of the specified folder, and checks to make sure
         that the corresponding object is present in the specified container. If
@@ -2053,21 +2118,43 @@ class StorageClient(BaseClient):
         file names, and any names that match any of the 'ignore' patterns will
         not be uploaded. The patterns should be standard *nix-style shell
         patterns; e.g., '*pyc' will ignore all files ending in 'pyc', such as
-        'program.pyc' and 'abcpyc'.  """
+        'program.pyc' and 'abcpyc'.
+
+        If `object_prefix` is set it will be appended to the object name when
+        it is checked and uploaded to the container. For example, if you use
+        sync_folder_to_container("folderToSync/", myContainer,
+            object_prefix="imgFolder") it will upload the files to the
+        container/imgFolder/... instead of just container/...
+
+        Set `verbose` to True to make it print what is going on. It will
+        show which files are being uploaded and which ones are not and why.
+        """
+        cont = self.get_container(container)
         self._local_files = []
-        self._sync_folder_to_container(folder_path, container, prefix="",
+        # Load a list of all the remote objects so we don't have to keep
+        # hitting the service
+        if verbose:
+            log = logging.getLogger("pyrax")
+            log.info("Loading remote object list (prefix=%s)", object_prefix)
+        data = cont.get_objects(prefix=object_prefix, full_listing=True)
+        self._remote_files = dict((d.name, d) for d in data)
+        self._sync_folder_to_container(folder_path, cont, prefix="",
                 delete=delete, include_hidden=include_hidden, ignore=ignore,
-                ignore_timestamps=ignore_timestamps)
+                ignore_timestamps=ignore_timestamps,
+                object_prefix=object_prefix, verbose=verbose)
+        # Unset the _remote_files
+        self._remote_files = None
 
 
     def _sync_folder_to_container(self, folder_path, container, prefix, delete,
-            include_hidden, ignore, ignore_timestamps):
+            include_hidden, ignore, ignore_timestamps, object_prefix, verbose):
         """
         This is the internal method that is called recursively to handle
         nested folder structures.
         """
         fnames = os.listdir(folder_path)
         ignore = utils.coerce_string_to_list(ignore)
+        log = logging.getLogger("pyrax")
         if not include_hidden:
             ignore.append(".*")
         for fname in fnames:
@@ -2078,19 +2165,22 @@ class StorageClient(BaseClient):
                 subprefix = fname
                 if prefix:
                     subprefix = "%s/%s" % (prefix, subprefix)
-                self._sync_folder_to_container(pth, container, prefix=subprefix,
+                self._sync_folder_to_container(pth, cont, prefix=subprefix,
                         delete=delete, include_hidden=include_hidden,
-                        ignore=ignore, ignore_timestamps=ignore_timestamps)
+                        ignore=ignore, ignore_timestamps=ignore_timestamps,
+                        object_prefix=object_prefix, verbose=verbose)
                 continue
-            self._local_files.append(os.path.join(prefix, fname))
+            self._local_files.append(os.path.join(object_prefix, prefix, fname))
             local_etag = utils.get_checksum(pth)
             fullname = fname
+            fullname_with_prefix = "%s/%s" % (object_prefix, fname)
             if prefix:
                 fullname = "%s/%s" % (prefix, fname)
+                fullname_with_prefix = "%s/%s/%s" % (object_prefix, prefix, fname)
             try:
-                obj = self.get_object(container, fullname)
+                obj = self._remote_files[fullname_with_prefix]
                 obj_etag = obj.etag
-            except exc.NoSuchObject:
+            except KeyError:
                 obj = None
                 obj_etag = None
             if local_etag != obj_etag:
@@ -2104,25 +2194,34 @@ class StorageClient(BaseClient):
                     local_mod_str = local_mod.isoformat()
                     if obj_time_str >= local_mod_str:
                         # Remote object is newer
+                        if verbose:
+                            log.info("%s NOT UPLOADED because remote object is "
+                                    "newer", fullname)
                         continue
-                self.upload_file(container, pth, obj_name=fullname,
-                        etag=local_etag, return_none=True)
+                cont.upload_file(pth, obj_name=fullname_with_prefix,
+                    etag=local_etag, return_none=True)
+                if verbose:
+                    log.info("%s UPLOADED", fullname)
+            else:
+                if verbose:
+                    log.info("%s NOT UPLOADED because it already exists",
+                            fullname)
         if delete and not prefix:
-            self._delete_objects_not_in_list(container)
+            self._delete_objects_not_in_list(cont, object_prefix)
 
 
-    def _delete_objects_not_in_list(self, container):
+    def _delete_objects_not_in_list(self, cont, object_prefix=""):
         """
         Finds all the objects in the specified container that are not present
         in the self._local_files list, and deletes them.
         """
-        container = self.get(container)
-        objnames = set(container.list_object_names(full_listing=True))
+        objnames = set(cont.get_object_names(prefix=object_prefix,
+                full_listing=True))
         localnames = set(self._local_files)
         to_delete = list(objnames.difference(localnames))
         # We don't need to wait around for this to complete. Store the thread
         # reference in case it is needed at some point.
-        self._thread = self.bulk_delete(container, to_delete, async=True)
+        self._thread = self.bulk_delete(cont, to_delete, async=True)
 
 
     def bulk_delete(self, container, object_names, async=False):
