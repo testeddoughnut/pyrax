@@ -33,6 +33,7 @@ class PyraxInitTest(unittest.TestCase):
         self.tenant_id = "faketenantid"
 
     def setUp(self):
+        self.identity = fakes.FakeIdentity()
         vers = pyrax.version.version
         pyrax.settings._settings = {
                 "default": {
@@ -436,7 +437,7 @@ class PyraxInitTest(unittest.TestCase):
     def test_connect_to_cloudfiles(self):
         pyrax.cloudfiles = None
         pyrax.connect_to_cloudfiles = self.orig_connect_to_cloudfiles
-        pyrax.cloudfiles = pyrax.connect_to_cloudfiles()
+        pyrax.cloudfiles = pyrax.connect_to_cloudfiles(self.identity)
         self.assertIsNotNone(pyrax.cloudfiles)
 
     def test_connect_to_cloudfiles_ServiceNet(self):
@@ -446,7 +447,7 @@ class PyraxInitTest(unittest.TestCase):
         pyrax.connect_to_cloudfiles = self.orig_connect_to_cloudfiles
         sav = pyrax._create_client
         pyrax._create_client = Mock()
-        cf = pyrax.connect_to_cloudfiles(public=None)
+        cf = pyrax.connect_to_cloudfiles(self.identity, public=None)
         pyrax._create_client.assert_called_once_with(ep_name="object_store",
                 region=None, public=False)
         pyrax.set_setting("use_servicenet", orig)

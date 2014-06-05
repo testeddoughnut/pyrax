@@ -241,29 +241,6 @@ class IdentityTest(unittest.TestCase):
         ret = ep.client_private
         self.assertEqual(ret, clt)
 
-    def test_ep_create_client_obj_store(self):
-        svc = self.service
-        pub = utils.random_unicode()
-        priv = utils.random_unicode()
-        ep_dict = {"publicURL": pub, "privateURL": priv, "tenantId": "aa"}
-        rgn = utils.random_unicode().upper()
-        ep = fakes.FakeEndpoint(ep_dict, svc, rgn, self.identity)
-        vssl = random.choice((True, False))
-        public = random.choice((True, False))
-        sav_gs = pyrax.get_setting
-        pyrax.get_setting = Mock(return_value=vssl)
-        sav_conn = pyrax.connect_to_cloudfiles
-        fake_client = fakes.FakeClient()
-        fake_client.identity = self.identity
-        pyrax.connect_to_cloudfiles = Mock(return_value=fake_client)
-        ep.service = "object_store"
-        ret = ep._create_client(None, None, public)
-        self.assertEqual(ret, fake_client)
-        pyrax.connect_to_cloudfiles.assert_called_once_with(region=ep.region,
-                public=public, context=ep.identity)
-        pyrax.connect_to_cloudfiles = sav_conn
-        pyrax.get_setting = sav_gs
-
     def test_ep_create_client_compute(self):
         svc = self.service
         pub = utils.random_unicode()
