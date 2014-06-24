@@ -20,10 +20,12 @@
 
 from __future__ import print_function
 from __future__ import absolute_import
+import datetime
 from functools import wraps
 import hashlib
 import hmac
 import json
+import logging
 import math
 import mimetypes
 import os
@@ -51,7 +53,8 @@ MAX_FILE_SIZE = 5368709119
 DEFAULT_CHUNKSIZE = 65536
 # The default for CDN when TTL is not specified.
 DEFAULT_CDN_TTL = 86400
-
+# When comparing files dates, represents a date older than anything.
+EARLY_DATE_STR = "1900-01-01T00:00:00"
 
 # Used to indicate values that are lazy-loaded
 class Fault_cls(object):
@@ -102,6 +105,17 @@ def _validate_file_or_path(file_or_path, obj_name):
         except AttributeError:
             fname = None
     return obj_name or fname
+
+
+def _valid_upload_key(fnc):
+    def wrapped(self, upload_key, *args, **kwargs):
+        try:
+            self.folder_upload_status[upload_key]
+        except KeyError:
+            raise exc.InvalidUploadID("There is no folder upload with the "
+                    "key '%s'." % upload_key)
+        return fnc(self, upload_key, *args, **kwargs)
+    return wrapped
 
 
 def get_file_size(fileobj):
@@ -2969,18 +2983,17 @@ class StorageClient(BaseClient):
                 subprefix = fname
                 if prefix:
                     subprefix = "%s/%s" % (prefix, subprefix)
-                self._sync_folder_to_container(pth, cont, prefix=subprefix,
+                self._sync_folder_to_container(pth, container, prefix=subprefix,
                         delete=delete, include_hidden=include_hidden,
                         ignore=ignore, ignore_timestamps=ignore_timestamps,
                         object_prefix=object_prefix, verbose=verbose)
                 continue
-            self._local_files.append(os.path.join(object_prefix, prefix, fname))
+            self._local_files.append(os.path.join(object_prefix, prefix,
+                    fname))
             local_etag = utils.get_checksum(pth)
-            fullname = fname
-            fullname_with_prefix = "%s/%s" % (object_prefix, fname)
-            if prefix:
-                fullname = "%s/%s" % (prefix, fname)
-                fullname_with_prefix = "%s/%s/%s" % (object_prefix, prefix, fname)
+            if object_prefix:
+                prefix = os.path.join(prefix, object_prefix)
+            fullname_with_prefix = os.path.join(prefix, fname)
             try:
                 obj = self._remote_files[fullname_with_prefix]
                 obj_etag = obj.etag
@@ -3000,18 +3013,18 @@ class StorageClient(BaseClient):
                         # Remote object is newer
                         if verbose:
                             log.info("%s NOT UPLOADED because remote object is "
-                                    "newer", fullname)
+                                    "newer", fullname_with_prefix)
                         continue
-                cont.upload_file(pth, obj_name=fullname_with_prefix,
+                container.upload_file(pth, obj_name=fullname_with_prefix,
                     etag=local_etag, return_none=True)
                 if verbose:
-                    log.info("%s UPLOADED", fullname)
+                    log.info("%s UPLOADED", fullname_with_prefix)
             else:
                 if verbose:
                     log.info("%s NOT UPLOADED because it already exists",
-                            fullname)
+                            fullname_with_prefix)
         if delete and not prefix:
-            self._delete_objects_not_in_list(cont, object_prefix)
+            self._delete_objects_not_in_list(container, object_prefix)
 
 
     def _delete_objects_not_in_list(self, cont, object_prefix=""):
@@ -3086,17 +3099,6 @@ class StorageClient(BaseClient):
         return resp, resp_body
 
 
-    def _valid_upload_key(fnc):
-        def wrapped(self, upload_key, *args, **kwargs):
-            try:
-                self.folder_upload_status[upload_key]
-            except KeyError:
-                raise exc.InvalidUploadID("There is no folder upload with the "
-                        "key '%s'." % upload_key)
-            return fnc(self, upload_key, *args, **kwargs)
-        return wrapped
-
-
     @_valid_upload_key
     def _update_progress(self, upload_key, size):
         self.folder_upload_status[upload_key]["uploaded"] += size
@@ -3138,14 +3140,18 @@ class FolderUploader(threading.Thread):
         self.ttl = ttl
         self.client = client
         if container:
-            self.container = self.client.create(container)
+            if isinstance(container, six.string_types):
+                self.container = self.client.create(container)
+            else:
+                self.container = container
         else:
             self.container = self.client.create(
                     self.folder_name_from_path(root_folder))
         threading.Thread.__init__(self)
 
 
-    def folder_name_from_path(self, pth):
+    @staticmethod
+    def folder_name_from_path(pth):
         """Convenience method that first strips trailing path separators."""
         return os.path.basename(pth.rstrip(os.sep))
 
@@ -3154,15 +3160,16 @@ class FolderUploader(threading.Thread):
         """Handles the iteration across files within a folder."""
         if utils.match_pattern(dirname, self.ignore):
             return False
-        for fname in (nm for nm in fnames
-                if not utils.match_pattern(nm, self.ignore)):
+        good_names = (nm for nm in fnames
+                if not utils.match_pattern(nm, self.ignore))
+        for fname in good_names:
             if self.client._should_abort_folder_upload(self.upload_key):
                 return
             full_path = os.path.join(dirname, fname)
             if os.path.isdir(full_path):
                 # Skip folders; os.walk will include them in the next pass.
                 continue
-            obj_name = os.path.relpath(full_path, self.base_path)
+            obj_name = os.path.relpath(full_path, self.root_folder)
             obj_size = os.stat(full_path).st_size
             self.client.upload_file(self.container, full_path,
                     obj_name=obj_name, return_none=True, ttl=self.ttl)
@@ -3172,7 +3179,7 @@ class FolderUploader(threading.Thread):
     def run(self):
         """Starts the uploading thread."""
         root_path, folder_name = os.path.split(self.root_folder)
-        self.base_path = os.path.join(root_path, folder_name)
+        self.root_folder = os.path.join(root_path, folder_name)
         os.path.walk(self.root_folder, self.upload_files_in_folder, None)
 
 

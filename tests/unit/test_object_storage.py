@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import logging
 import mimetypes
 import os
 import random
@@ -16,10 +17,12 @@ import pyrax
 import pyrax.object_storage
 from pyrax.object_storage import ACCOUNT_META_PREFIX
 from pyrax.object_storage import assure_container
+from pyrax.object_storage import BulkDeleter
 from pyrax.object_storage import Container
 from pyrax.object_storage import CONTAINER_META_PREFIX
 from pyrax.object_storage import Fault_cls
 from pyrax.object_storage import FAULT
+from pyrax.object_storage import FolderUploader
 from pyrax.object_storage import get_file_size
 from pyrax.object_storage import OBJECT_META_PREFIX
 from pyrax.object_storage import _massage_metakeys
@@ -27,6 +30,7 @@ from pyrax.object_storage import StorageClient
 from pyrax.object_storage import StorageObject
 from pyrax.object_storage import StorageObjectIterator
 from pyrax.object_storage import _validate_file_or_path
+from pyrax.object_storage import _valid_upload_key
 import pyrax.exceptions as exc
 import pyrax.utils as utils
 
@@ -96,6 +100,32 @@ class ObjectStorageTest(unittest.TestCase):
         obj_name = utils.random_unicode()
         ret = _validate_file_or_path(pth, obj_name)
         self.assertEqual(ret, obj_name)
+
+    def test_valid_upload_key_good(self):
+        clt = self.client
+
+        @_valid_upload_key
+        def test(self, upload_key):
+            return "OK"
+
+        key = utils.random_unicode()
+        fake_status = utils.random_unicode()
+        clt.folder_upload_status = {key: fake_status}
+        ret = test(clt, key)
+        self.assertEqual(ret, "OK")
+
+    def test_valid_upload_key_bad(self):
+        clt = self.client
+
+        @_valid_upload_key
+        def test(self, upload_key):
+            return "OK"
+
+        key = utils.random_unicode()
+        bad_key = utils.random_unicode()
+        fake_status = utils.random_unicode()
+        clt.folder_upload_status = {key: fake_status}
+        self.assertRaises(exc.InvalidUploadID, test, clt, bad_key)
 
     def test_get_file_size(self):
         sz = random.randint(42, 420)
@@ -2796,9 +2826,486 @@ class ObjectStorageTest(unittest.TestCase):
                     break
             self.assertEqual(txt, "aaabbbccc")
 
+    def test_clt_download_object(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        obj = self.obj
+        directory = utils.random_unicode()
+        structure = utils.random_unicode()
+        mgr.download_object = Mock()
+        clt.download_object(cont, obj, directory, structure=structure)
+        mgr.download_object.assert_called_once_with(cont, obj, directory,
+                structure=structure)
 
+    def test_clt_delete(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        del_objects = utils.random_unicode()
+        mgr.delete = Mock()
+        clt.delete(cont, del_objects=del_objects)
+        mgr.delete.assert_called_once_with(cont, del_objects=del_objects)
 
+    def test_clt_delete_object(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        obj = self.obj
+        mgr.delete_object = Mock()
+        clt.delete_object(cont, obj)
+        mgr.delete_object.assert_called_once_with(cont, obj)
 
+    def test_clt_copy_object(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        obj = self.obj
+        new_container = utils.random_unicode()
+        new_obj_name = utils.random_unicode()
+        content_type = utils.random_unicode()
+        extra_info = utils.random_unicode()
+        mgr.copy_object = Mock()
+        clt.copy_object(cont, obj, new_container, new_obj_name=new_obj_name,
+                content_type=content_type, extra_info=extra_info)
+        mgr.copy_object.assert_called_once_with(cont, obj, new_container,
+                new_obj_name=new_obj_name, content_type=content_type)
+
+    def test_clt_move_object(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        obj = self.obj
+        new_container = utils.random_unicode()
+        new_obj_name = utils.random_unicode()
+        new_reference = utils.random_unicode()
+        content_type = utils.random_unicode()
+        extra_info = utils.random_unicode()
+        mgr.move_object = Mock()
+        clt.move_object(cont, obj, new_container, new_obj_name=new_obj_name,
+                new_reference=new_reference, content_type=content_type,
+                extra_info=extra_info)
+        mgr.move_object.assert_called_once_with(cont, obj, new_container,
+                new_obj_name=new_obj_name, new_reference=new_reference,
+                content_type=content_type)
+
+    def test_clt_change_object_content_type(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        obj = self.obj
+        new_ctype = utils.random_unicode()
+        guess = utils.random_unicode()
+        extra_info = utils.random_unicode()
+        mgr.change_object_content_type = Mock()
+        clt.change_object_content_type(cont, obj, new_ctype, guess=guess,
+                extra_info=extra_info)
+        mgr.change_object_content_type.assert_called_once_with(cont, obj,
+                new_ctype, guess=guess)
+
+    def test_clt_upload_folder_bad_path(self):
+        clt = self.client
+        mgr = clt._manager
+        folder_path = utils.random_unicode()
+        self.assertRaises(exc.FolderNotFound, clt.upload_folder, folder_path)
+
+    def test_clt_upload_folder(self):
+        clt = self.client
+        mgr = clt._manager
+        cont = self.container
+        ignore = utils.random_unicode()
+        ttl = utils.random_unicode()
+        clt._upload_folder_in_background = Mock()
+        with utils.SelfDeletingTempDirectory() as folder_path:
+            key, total = clt.upload_folder(folder_path, container=cont,
+                    ignore=ignore, ttl=ttl)
+            clt._upload_folder_in_background.assert_called_once_with(
+                    folder_path, cont, [ignore], key, ttl)
+
+    @patch("pyrax.object_storage.FolderUploader.start")
+    def test_clt_upload_folder_in_background(self, mock_start):
+        clt = self.client
+        cont = self.container
+        folder_path = utils.random_unicode()
+        ignore = utils.random_unicode()
+        upload_key = utils.random_unicode()
+        ttl = utils.random_unicode()
+        clt._upload_folder_in_background(folder_path, cont, ignore, upload_key,
+                ttl)
+        mock_start.assert_called_once_with()
+
+    @patch("logging.Logger.info")
+    def test_clt_sync_folder_to_container(self, mock_log):
+        clt = self.client
+        cont = self.container
+        folder_path = utils.random_unicode()
+        delete = utils.random_unicode()
+        include_hidden = utils.random_unicode()
+        ignore = utils.random_unicode()
+        ignore_timestamps = utils.random_unicode()
+        object_prefix = utils.random_unicode()
+        verbose = utils.random_unicode()
+        num_objs = random.randint(1, 3)
+        ctype = "text/fake"
+        objs = [StorageObject(cont.object_manager,
+                {"name": "obj%s" % num, "content_type": ctype, "bytes": 42})
+                for num in range(num_objs)]
+        cont.get_objects = Mock(return_value=objs)
+        clt._sync_folder_to_container = Mock()
+        clt.sync_folder_to_container(folder_path, cont, delete=delete,
+                include_hidden=include_hidden, ignore=ignore,
+                ignore_timestamps=ignore_timestamps,
+                object_prefix=object_prefix, verbose=verbose)
+        clt._sync_folder_to_container.assert_called_once_with(folder_path, cont,
+                prefix="", delete=delete, include_hidden=include_hidden,
+                ignore=ignore, ignore_timestamps=ignore_timestamps,
+                object_prefix=object_prefix, verbose=verbose)
+
+    @patch("logging.Logger.info")
+    @patch("os.listdir")
+    def test_clt_under_sync_folder_to_container(self, mock_listdir, mock_log):
+        clt = self.client
+        cont = self.container
+        cont.upload_file = Mock()
+        clt._local_files = []
+        rem_obj = StorageObject(cont.object_manager, {"name": "test2",
+                "last_modified": "2014-01-01T00:00:00.000001", "bytes": 42,
+                "content_type": "text/fake", "hash": "FAKE"})
+        clt._remote_files = {"test2": rem_obj}
+        clt._delete_objects_not_in_list = Mock()
+        prefix = ""
+        delete = True
+        include_hidden = False
+        ignore = "fake*"
+        ignore_timestamps = False
+        object_prefix = ""
+        verbose = utils.random_unicode()
+        with utils.SelfDeletingTempDirectory() as folder_path:
+            # Create a few files
+            fnames = ["test1", "test2", "test3", "fake1", "fake2"]
+            for fname in fnames:
+                pth = os.path.join(folder_path, fname)
+                open(pth, "w").write("faketext")
+            mock_listdir.return_value = fnames
+            clt._sync_folder_to_container(folder_path, cont, prefix, delete,
+                    include_hidden, ignore, ignore_timestamps, object_prefix,
+                    verbose)
+        self.assertEqual(cont.upload_file.call_count, 3)
+
+    @patch("logging.Logger.info")
+    @patch("os.listdir")
+    def test_clt_under_sync_folder_to_container_newer(self, mock_listdir,
+            mock_log):
+        clt = self.client
+        cont = self.container
+        cont.upload_file = Mock()
+        clt._local_files = []
+        rem_obj = StorageObject(cont.object_manager, {"name": "test2",
+                "last_modified": "3000-01-01T00:00:00.000001", "bytes": 42,
+                "content_type": "text/fake", "hash": "FAKE"})
+        clt._remote_files = {"test2": rem_obj}
+        clt._delete_objects_not_in_list = Mock()
+        prefix = ""
+        delete = True
+        include_hidden = False
+        ignore = "fake*"
+        ignore_timestamps = False
+        object_prefix = ""
+        verbose = utils.random_unicode()
+        with utils.SelfDeletingTempDirectory() as folder_path:
+            # Create a few files
+            fnames = ["test1", "test2", "test3", "fake1", "fake2"]
+            for fname in fnames:
+                pth = os.path.join(folder_path, fname)
+                open(pth, "w").write("faketext")
+            mock_listdir.return_value = fnames
+            clt._sync_folder_to_container(folder_path, cont, prefix, delete,
+                    include_hidden, ignore, ignore_timestamps, object_prefix,
+                    verbose)
+        self.assertEqual(cont.upload_file.call_count, 2)
+
+    @patch("logging.Logger.info")
+    @patch("os.listdir")
+    def test_clt_under_sync_folder_to_container_same(self, mock_listdir,
+            mock_log):
+        clt = self.client
+        cont = self.container
+        cont.upload_file = Mock()
+        clt._local_files = []
+        txt = utils.random_ascii()
+        rem_obj = StorageObject(cont.object_manager, {"name": "test2",
+                "last_modified": "3000-01-01T00:00:00.000001", "bytes": 42,
+                "content_type": "text/fake", "hash": utils.get_checksum(txt)})
+        clt._remote_files = {"test2": rem_obj}
+        clt._delete_objects_not_in_list = Mock()
+        prefix = ""
+        delete = True
+        include_hidden = False
+        ignore = "fake*"
+        ignore_timestamps = False
+        object_prefix = ""
+        verbose = utils.random_unicode()
+        with utils.SelfDeletingTempDirectory() as folder_path:
+            # Create a few files
+            fnames = ["test1", "test2", "test3", "fake1", "fake2"]
+            for fname in fnames:
+                pth = os.path.join(folder_path, fname)
+                open(pth, "w").write(txt)
+            mock_listdir.return_value = fnames
+            clt._sync_folder_to_container(folder_path, cont, prefix, delete,
+                    include_hidden, ignore, ignore_timestamps, object_prefix,
+                    verbose)
+        self.assertEqual(cont.upload_file.call_count, 2)
+        args_list = mock_log.call_args_list
+        exist_call = any(["already exists" in call[0][0] for call in args_list])
+        self.assertTrue(exist_call)
+
+    @patch("logging.Logger.info")
+    def test_clt_under_sync_folder_to_container_nested(self, mock_log):
+        clt = self.client
+        clt._local_files = []
+        clt._remote_files = {}
+        cont = self.container
+        cont.upload_file = Mock()
+        clt._delete_objects_not_in_list = Mock()
+        sav = os.listdir
+        os.listdir = Mock()
+        prefix = "XXXXX"
+        delete = True
+        include_hidden = False
+        ignore = "fake*"
+        ignore_timestamps = False
+        object_prefix = utils.random_unicode(5)
+        verbose = utils.random_unicode()
+        with utils.SelfDeletingTempDirectory() as folder_path:
+            # Create a few files
+            fnames = ["test1", "test2", "test3", "fake1", "fake2"]
+            for fname in fnames:
+                pth = os.path.join(folder_path, fname)
+                open(pth, "w").write("faketext")
+            # Create a nested directory
+            dirname = "nested"
+            dirpth = os.path.join(folder_path, dirname)
+            os.mkdir(dirpth)
+            fnames.append(dirname)
+            os.listdir.side_effect = [fnames, []]
+            clt._sync_folder_to_container(folder_path, cont, prefix, delete,
+                    include_hidden, ignore, ignore_timestamps, object_prefix,
+                    verbose)
+            os.listdir = sav
+        self.assertEqual(cont.upload_file.call_count, 3)
+
+    def test_clt_delete_objects_not_in_list(self):
+        clt = self.client
+        clt._local_files = []
+        cont = self.container
+        object_prefix = utils.random_unicode(5)
+        obj_names = ["test1", "test2"]
+        cont.get_object_names = Mock(return_value=obj_names)
+        clt._local_files = ["test2"]
+        clt.bulk_delete = Mock()
+        exp_del = ["test1"]
+        clt._delete_objects_not_in_list(cont, object_prefix=object_prefix)
+        cont.get_object_names.assert_called_once_with(prefix=object_prefix,
+                full_listing=True)
+        clt.bulk_delete.assert_called_once_with(cont, exp_del, async=True)
+
+    @patch("pyrax.object_storage.BulkDeleter.start")
+    def test_clt_bulk_delete_async(self, mock_del):
+        clt = self.client
+        cont = self.container
+        obj_names = ["test1", "test2"]
+        ret = clt.bulk_delete(cont, obj_names, async=True)
+        self.assertTrue(isinstance(ret, BulkDeleter))
+
+    def test_clt_bulk_delete_sync(self):
+        clt = self.client
+        cont = self.container
+        obj_names = ["test1", "test2"]
+        resp = fakes.FakeResponse()
+        fake_res = utils.random_unicode()
+        body = {"Response Status": "foo " + fake_res}
+        clt.bulk_delete_interval = 0.01
+
+        def fake_bulk_resp(uri, data=None, headers=None):
+            time.sleep(0.05)
+            return (resp, body)
+
+        clt.method_delete = Mock(side_effect=fake_bulk_resp)
+        ret = clt.bulk_delete(cont, obj_names, async=False)
+        self.assertEqual(ret, body)
+
+    def test_clt_cdn_request_not_enabled(self):
+        clt = self.client
+        uri = utils.random_unicode()
+        method = random.choice(list(clt.method_dict.keys()))
+        clt.cdn_management_url = None
+        self.assertRaises(exc.NotCDNEnabled, clt.cdn_request, uri, method)
+
+    def test_clt_cdn_request(self):
+        clt = self.client
+        uri = utils.random_unicode()
+        method = "GET"
+        method = random.choice(list(clt.method_dict.keys()))
+        resp = utils.random_unicode()
+        body = utils.random_unicode()
+        clt.cdn_management_url = utils.random_unicode()
+        clt.method_dict[method] = Mock(return_value=(resp, body))
+        ret = clt.cdn_request(uri, method)
+        self.assertEqual(ret, (resp, body))
+
+    def test_clt_cdn_request_cont_not_cdn_enabled(self):
+        clt = self.client
+        uri = utils.random_unicode()
+        method = random.choice(list(clt.method_dict.keys()))
+        resp = utils.random_unicode()
+        body = utils.random_unicode()
+        clt.cdn_management_url = utils.random_unicode()
+        clt.method_dict[method] = Mock(side_effect=exc.NotFound(""))
+        clt.method_head = Mock(return_value=(resp, body))
+        self.assertRaises(exc.NotCDNEnabled, clt.cdn_request, uri, method)
+
+    def test_clt_cdn_request_not_found(self):
+        clt = self.client
+        uri = utils.random_unicode()
+        method = random.choice(list(clt.method_dict.keys()))
+        resp = utils.random_unicode()
+        body = utils.random_unicode()
+        clt.cdn_management_url = utils.random_unicode()
+        clt.method_dict[method] = Mock(side_effect=exc.NotFound(""))
+        clt.method_head = Mock(side_effect=exc.NotFound(""))
+        self.assertRaises(exc.NotFound, clt.cdn_request, uri, method)
+
+    def test_clt_update_progress(self):
+        clt = self.client
+        key = utils.random_unicode()
+        curr = random.randint(1, 100)
+        size = random.randint(1, 100)
+        clt.folder_upload_status = {key: {"uploaded": curr}}
+        clt._update_progress(key, size)
+        new_size = clt.get_uploaded(key)
+        self.assertEqual(new_size, curr + size)
+
+    def test_clt_cancel_folder_upload(self):
+        clt = self.client
+        key = utils.random_unicode()
+        clt.folder_upload_status = {key: {"continue": True}}
+        self.assertFalse(clt._should_abort_folder_upload(key))
+        clt.cancel_folder_upload(key)
+        self.assertTrue(clt._should_abort_folder_upload(key))
+
+    def test_folder_uploader_no_container(self):
+        pth1 = utils.random_unicode()
+        pth2 = utils.random_unicode()
+        pth3 = utils.random_unicode()
+        pth4 = utils.random_unicode()
+        root_folder = os.path.join(pth1, pth2, pth3, pth4)
+        container = None
+        ignore = utils.random_unicode()
+        upload_key = utils.random_unicode()
+        client = self.client
+        ttl = utils.random_unicode()
+        ret = FolderUploader(root_folder, container, ignore, upload_key,
+                client, ttl=ttl)
+        self.assertEqual(ret.container.name, pth4)
+        self.assertEqual(ret.root_folder, root_folder)
+        self.assertEqual(ret.ignore, [ignore])
+        self.assertEqual(ret.upload_key, upload_key)
+        self.assertEqual(ret.ttl, ttl)
+        self.assertEqual(ret.client, client)
+
+    def test_folder_uploader_container_name(self):
+        root_folder = utils.random_unicode()
+        container = utils.random_unicode()
+        ignore = utils.random_unicode()
+        upload_key = utils.random_unicode()
+        client = self.client
+        ttl = utils.random_unicode()
+        client.create = Mock()
+        ret = FolderUploader(root_folder, container, ignore, upload_key,
+                client, ttl=ttl)
+        client.create.assert_called_once_with(container)
+
+    def test_folder_uploader_folder_name_from_path(self):
+        pth1 = utils.random_unicode()
+        pth2 = utils.random_unicode()
+        pth3 = utils.random_unicode()
+        fullpath = os.path.join(pth1, pth2, pth3) + "/"
+        ret = FolderUploader.folder_name_from_path(fullpath)
+        self.assertEqual(ret, pth3)
+
+    def test_folder_uploader_upload_files_in_folder_bad_dirname(self):
+        clt = self.client
+        cont = self.container
+        root_folder = utils.random_unicode()
+        ignore = "*FAKE*"
+        upload_key = utils.random_unicode()
+        folder_up = FolderUploader(root_folder, cont, ignore, upload_key, clt)
+        arg = utils.random_unicode()
+        dirname = "FAKE DIRECTORY"
+        fname1 = utils.random_unicode()
+        fname2 = utils.random_unicode()
+        fnames = [fname1, fname2]
+        ret = folder_up.upload_files_in_folder(arg, dirname, fnames)
+        self.assertFalse(ret)
+
+    def test_folder_uploader_upload_files_in_folder_abort(self):
+        clt = self.client
+        cont = self.container
+        root_folder = utils.random_unicode()
+        ignore = "*FAKE*"
+        upload_key = utils.random_unicode()
+        folder_up = FolderUploader(root_folder, cont, ignore, upload_key, clt)
+        arg = utils.random_unicode()
+        dirname = utils.random_unicode()
+        fname1 = utils.random_unicode()
+        fname2 = utils.random_unicode()
+        fnames = [fname1, fname2]
+        clt._should_abort_folder_upload = Mock(return_value=True)
+        clt.upload_file = Mock()
+        ret = folder_up.upload_files_in_folder(arg, dirname, fnames)
+        self.assertEqual(clt.upload_file.call_count, 0)
+
+    def test_folder_uploader_upload_files_in_folder(self):
+        clt = self.client
+        cont = self.container
+        ignore = "*FAKE*"
+        upload_key = utils.random_unicode()
+        arg = utils.random_unicode()
+        fname1 = utils.random_ascii()
+        fname2 = utils.random_ascii()
+        fname3 = utils.random_ascii()
+        with utils.SelfDeletingTempDirectory() as tmpdir:
+            fnames = [tmpdir, fname1, fname2, fname3]
+            for fname in fnames[1:]:
+                pth = os.path.join(tmpdir, fname)
+                open(pth, "w").write("faketext")
+            clt._should_abort_folder_upload = Mock(return_value=False)
+            clt.upload_file = Mock()
+            clt._update_progress = Mock()
+            folder_up = FolderUploader(tmpdir, cont, ignore, upload_key, clt)
+            ret = folder_up.upload_files_in_folder(arg, tmpdir, fnames)
+            self.assertEqual(clt.upload_file.call_count, len(fnames) - 1)
+
+    def test_folder_uploader_run(self):
+        clt = self.client
+        cont = self.container
+        ignore = "*FAKE*"
+        upload_key = utils.random_unicode()
+        arg = utils.random_unicode()
+        fname1 = utils.random_ascii()
+        fname2 = utils.random_ascii()
+        fname3 = utils.random_ascii()
+        with utils.SelfDeletingTempDirectory() as tmpdir:
+            fnames = [tmpdir, fname1, fname2, fname3]
+            for fname in fnames[1:]:
+                pth = os.path.join(tmpdir, fname)
+                open(pth, "w").write("faketext")
+            clt._should_abort_folder_upload = Mock(return_value=False)
+            folder_up = FolderUploader(tmpdir, cont, ignore, upload_key, clt)
+            folder_up.upload_files_in_folder = Mock()
+            folder_up.run()
+            self.assertEqual(folder_up.upload_files_in_folder.call_count, 1)
 
 
 if __name__ == "__main__":
